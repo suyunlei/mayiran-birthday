@@ -170,6 +170,12 @@
         let isStarted = false;
         let isLoading = true;
         let loadingProgress = 0;
+        let running = true; // 控制渲染循环
+
+        // 监听页面可见性，节省资源
+        document.addEventListener("visibilitychange", () => {
+            running = !document.hidden;
+        });
 
         // --- 资源加载管理器 ---
         const manager = new THREE.LoadingManager();
@@ -252,19 +258,17 @@
 
         // --- 照片弹窗逻辑 ---
         function openModal(imgUrl) {
+            running = false; // 暂停渲染，防止崩溃
             const modal = document.getElementById('photo-modal');
             const img = document.getElementById('modal-img');
             img.src = imgUrl;
             modal.classList.add('active');
-            // 暂停自动旋转
-            controls.autoRotate = false;
         }
 
         function closeModal() {
             const modal = document.getElementById('photo-modal');
             modal.classList.remove('active');
-            // 恢复自动旋转
-            controls.autoRotate = true;
+            setTimeout(() => { running = true; }, 50); // 恢复渲染
         }
 
         // --- 3D 初始化 ---
@@ -290,7 +294,7 @@
 
             controls = new THREE.OrbitControls(camera, renderer.domElement);
             controls.enableDamping = true;
-            controls.dampingFactor = 0.05;
+            controls.dampingFactor = 0.035; // 降低阻尼系数
             controls.autoRotate = true;
             controls.autoRotateSpeed = 0.8; 
             controls.enableZoom = true;
@@ -315,12 +319,14 @@
             animate();
         }
 
-        // --- 创建照片球 ---
+        // --- 创建照片球 (队列式加载优化) ---
         function createPhotos(isMobile) {
             photoGroup = new THREE.Group();
+            scene.add(photoGroup); // 先加入场景
+
             const loader = new THREE.TextureLoader(manager);
             
-            // 增强版加载逻辑
+            // 增强版加载逻辑 (保留后缀自动匹配)
             if (!loader.__extFallbackWrapped) {
                 const origLoad = loader.load.bind(loader);
                 loader.__extFallbackWrapped = true;
@@ -342,52 +348,62 @@
             }
 
             const vector = new THREE.Vector3();
+            let i = 1;
 
-            for (let i = 1; i <= photoCount; i++) {
-                let imgUrl = useDemoPhotos ? `https://picsum.photos/400/600?random=${i}` : `${i}`;
+            function addBatch() {
+                // 每批加载 3 张
+                const batchSize = 3;
 
-                loader.load(imgUrl, (texture) => {
-                    // 内存优化：移动端禁用 mipmaps 以节省显存
-                    if (isMobile) {
+                for (let k = 0; k < batchSize && i <= photoCount; k++, i++) {
+                    let imgUrl = useDemoPhotos ? `https://picsum.photos/400/600?random=${i}` : `${i}`;
+
+                    loader.load(imgUrl, (texture) => {
+                        // 关键：减少 GPU 峰值但不明显降画质
                         texture.generateMipmaps = false;
                         texture.minFilter = THREE.LinearFilter;
-                    }
-                    
-                    // 释放掉原始图片引用，帮助GC
-                    texture.image.crossOrigin = "Anonymous";
+                        texture.magFilter = THREE.LinearFilter;
+                        
+                        // 释放掉原始图片引用，帮助GC
+                        texture.image.crossOrigin = "Anonymous";
 
-                    // 随机调整一点图片比例
-                    const ratio = texture.image.width / texture.image.height;
-                    const w = 4 * Math.min(ratio, 1.2); 
-                    const h = 4; 
+                        // 随机调整一点图片比例
+                        const ratio = texture.image.width / texture.image.height;
+                        const w = 4 * Math.min(ratio, 1.2); 
+                        const h = 4; 
 
-                    const geometry = new THREE.PlaneGeometry(w, h);
-                    const material = new THREE.MeshBasicMaterial({ 
-                        map: texture, 
-                        side: THREE.DoubleSide,
-                        transparent: true,
-                        opacity: 0.9
+                        const geometry = new THREE.PlaneGeometry(w, h);
+                        const material = new THREE.MeshBasicMaterial({ 
+                            map: texture, 
+                            side: THREE.DoubleSide,
+                            transparent: true,
+                            opacity: 0.9
+                        });
+                        
+                        const mesh = new THREE.Mesh(geometry, material);
+                        
+                        // 存储URL以便点击时使用
+                        mesh.userData = { isPhoto: true, url: texture.image.src };
+
+                        // 斐波那契球体分布
+                        const phi = Math.acos(-1 + (2 * (i - 1)) / photoCount);
+                        const theta = Math.sqrt(photoCount * Math.PI) * phi;
+                        const r = 32 + Math.random() * 5; 
+
+                        mesh.position.setFromSphericalCoords(r, phi, theta);
+                        mesh.lookAt(vector); // 面向圆心
+                        // 再稍微反转一下，让图片面向外部（面向相机）
+                        mesh.lookAt(mesh.position.clone().multiplyScalar(2));
+                        
+                        photoGroup.add(mesh);
                     });
-                    
-                    const mesh = new THREE.Mesh(geometry, material);
-                    
-                    // 存储URL以便点击时使用
-                    mesh.userData = { isPhoto: true, url: texture.image.src };
+                }
 
-                    // 斐波那契球体分布
-                    const phi = Math.acos(-1 + (2 * (i - 1)) / photoCount);
-                    const theta = Math.sqrt(photoCount * Math.PI) * phi;
-                    const r = 32 + Math.random() * 5; 
-
-                    mesh.position.setFromSphericalCoords(r, phi, theta);
-                    mesh.lookAt(vector); // 面向圆心
-                    // 再稍微反转一下，让图片面向外部（面向相机）
-                    mesh.lookAt(mesh.position.clone().multiplyScalar(2));
-                    
-                    photoGroup.add(mesh);
-                });
+                if (i <= photoCount) {
+                    requestAnimationFrame(addBatch); // 下一帧继续加
+                }
             }
-            scene.add(photoGroup);
+
+            addBatch();
         }
 
         // --- 创建漂浮文字 ---
@@ -526,6 +542,10 @@
         // --- 动画循环 ---
         function animate() {
             requestAnimationFrame(animate);
+            
+            // 如果页面不可见或暂停渲染，直接跳过
+            if (!running) return;
+
             controls.update();
             
             // 流星更新
