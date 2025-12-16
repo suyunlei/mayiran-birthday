@@ -276,9 +276,16 @@
             const isMobile = window.innerWidth < 768;
             camera.position.z = isMobile ? 65 : 45;
 
-            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            // 性能优化：移动端关闭抗锯齿，降低像素比
+            renderer = new THREE.WebGLRenderer({ 
+                antialias: !isMobile, 
+                alpha: true,
+                powerPreference: "high-performance"
+            });
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            // 移动端强制1倍像素比，防止内存溢出
+            renderer.setPixelRatio(isMobile ? 1 : Math.min(window.devicePixelRatio, 2));
+            
             document.getElementById('canvas-container').appendChild(renderer.domElement);
 
             controls = new THREE.OrbitControls(camera, renderer.domElement);
@@ -294,7 +301,7 @@
             mouse = new THREE.Vector2();
 
             // 构建场景
-            createPhotos();
+            createPhotos(isMobile);
             createFloatingText(); // 新增：漂浮文字
             createBackgroundStars(); 
             createShootingStarSystem(); // 新增：流星系统
@@ -309,7 +316,7 @@
         }
 
         // --- 创建照片球 ---
-        function createPhotos() {
+        function createPhotos(isMobile) {
             photoGroup = new THREE.Group();
             const loader = new THREE.TextureLoader(manager);
             
@@ -340,6 +347,15 @@
                 let imgUrl = useDemoPhotos ? `https://picsum.photos/400/600?random=${i}` : `${i}`;
 
                 loader.load(imgUrl, (texture) => {
+                    // 内存优化：移动端禁用 mipmaps 以节省显存
+                    if (isMobile) {
+                        texture.generateMipmaps = false;
+                        texture.minFilter = THREE.LinearFilter;
+                    }
+                    
+                    // 释放掉原始图片引用，帮助GC
+                    texture.image.crossOrigin = "Anonymous";
+
                     // 随机调整一点图片比例
                     const ratio = texture.image.width / texture.image.height;
                     const w = 4 * Math.min(ratio, 1.2); 
