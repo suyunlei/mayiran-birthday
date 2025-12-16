@@ -304,8 +304,12 @@
             raycaster = new THREE.Raycaster();
             mouse = new THREE.Vector2();
 
+            // 动态调整照片数量：手机端为了防崩溃，强制减少同时显示的照片数量
+            // 显存是有限的，这是物理瓶颈
+            const safePhotoCount = isMobile ? Math.min(photoCount, 40) : photoCount;
+
             // 构建场景
-            createPhotos(isMobile);
+            createPhotos(isMobile, safePhotoCount);
             createFloatingText(); // 新增：漂浮文字
             createBackgroundStars(); 
             createShootingStarSystem(); // 新增：流星系统
@@ -320,7 +324,7 @@
         }
 
         // --- 创建照片球 (队列式加载优化) ---
-        function createPhotos(isMobile) {
+        function createPhotos(isMobile, count) {
             photoGroup = new THREE.Group();
             scene.add(photoGroup); // 先加入场景
 
@@ -354,20 +358,54 @@
                 // 每批加载 3 张
                 const batchSize = 3;
 
-                for (let k = 0; k < batchSize && i <= photoCount; k++, i++) {
-                    let imgUrl = useDemoPhotos ? `https://picsum.photos/400/600?random=${i}` : `${i}`;
+                for (let k = 0; k < batchSize && i <= count; k++, i++) {
+                    const currentIndex = i; // 关键修复：捕获当前索引，防止异步回调中 i 值错误
+                    let imgUrl = useDemoPhotos ? `https://picsum.photos/400/600?random=${currentIndex}` : `${currentIndex}`;
 
                     loader.load(imgUrl, (texture) => {
+                        // 关键修复：在任何处理之前，先捕获原始图片的 URL
+                        // 如果 texture.image.src 存在（通常是 blob: 或 http://...），就用它
+                        // 如果不存在（极少情况），则回退到 imgUrl
+                        let originalUrl = imgUrl;
+                        if (texture.image && texture.image.src) {
+                            originalUrl = texture.image.src;
+                        }
+
+                        // --- 显存安全阀 ---
+                        // 即使图片文件很小，解压后的像素数据也可能撑爆显存
+                        // 手机端强制限制纹理分辨率
+                        if (isMobile) {
+                            const maxDim = 1024; // 限制最大边长
+                            if (texture.image.width > maxDim || texture.image.height > maxDim) {
+                                const canvas = document.createElement('canvas');
+                                const ratio = texture.image.width / texture.image.height;
+                                if (ratio > 1) {
+                                    canvas.width = maxDim;
+                                    canvas.height = maxDim / ratio;
+                                } else {
+                                    canvas.height = maxDim;
+                                    canvas.width = maxDim * ratio;
+                                }
+                                const ctx = canvas.getContext('2d');
+                                ctx.drawImage(texture.image, 0, 0, canvas.width, canvas.height);
+                                
+                                // 销毁原纹理，释放显存
+                                texture.dispose();
+                                // 使用压缩后的新纹理
+                                texture = new THREE.CanvasTexture(canvas);
+                            }
+                        }
+
                         // 关键：减少 GPU 峰值但不明显降画质
                         texture.generateMipmaps = false;
                         texture.minFilter = THREE.LinearFilter;
                         texture.magFilter = THREE.LinearFilter;
                         
                         // 释放掉原始图片引用，帮助GC
-                        texture.image.crossOrigin = "Anonymous";
+                        if (texture.image) texture.image.crossOrigin = "Anonymous";
 
                         // 随机调整一点图片比例
-                        const ratio = texture.image.width / texture.image.height;
+                        const ratio = texture.image ? (texture.image.width / texture.image.height) : 1;
                         const w = 4 * Math.min(ratio, 1.2); 
                         const h = 4; 
 
@@ -382,11 +420,11 @@
                         const mesh = new THREE.Mesh(geometry, material);
                         
                         // 存储URL以便点击时使用
-                        mesh.userData = { isPhoto: true, url: texture.image.src };
+                        mesh.userData = { isPhoto: true, url: originalUrl };
 
                         // 斐波那契球体分布
-                        const phi = Math.acos(-1 + (2 * (i - 1)) / photoCount);
-                        const theta = Math.sqrt(photoCount * Math.PI) * phi;
+                        const phi = Math.acos(-1 + (2 * (currentIndex - 1)) / count);
+                        const theta = Math.sqrt(count * Math.PI) * phi;
                         const r = 32 + Math.random() * 5; 
 
                         mesh.position.setFromSphericalCoords(r, phi, theta);
@@ -398,7 +436,7 @@
                     });
                 }
 
-                if (i <= photoCount) {
+                if (i <= count) {
                     requestAnimationFrame(addBatch); // 下一帧继续加
                 }
             }
